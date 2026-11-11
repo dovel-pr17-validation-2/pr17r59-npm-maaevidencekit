@@ -1,0 +1,34 @@
+# Legacy local environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.langgraph_api/
+model.local.json
+.coverage
+htmlcov/
+
+# Node.js
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local caches and research data
+.cache/
+.uv-cache/
+tmp/
+analysis-archive/
+sample/
+
+# Editors and local agent configuration
+.vscode/
+.idea/
+.claude/
+.agents/
+.codex
+
+# Build artifacts
+build/
+*.egg-info/

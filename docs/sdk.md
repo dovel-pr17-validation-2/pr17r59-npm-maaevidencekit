@@ -1,0 +1,97 @@
+# MaaEvidenceKit SDK 参考
+
+`maa-evidence-kit` npm 包的 SDK 用法与选项参考。快速上手与安装见仓库 [`README.md`](../README.md)。
+
+## 示例
+
+```ts
+import {
+  inspect,
+  inspectMla,
+  inspectMse,
+  inspectRepositoryDocs,
+  evidenceById,
+  queryEvidenceBatch,
+  queryEvidenceWindow,
+  resolveMse,
+  searchEvidence,
+  view,
+} from "maa-evidence-kit";
+
+const runtime = await inspectMla("C:/debug", {
+  timeRange: {
+    from: "2026-07-19 10:00:00",
+    to: "2026-07-19 10:10:00",
+  },
+});
+
+const project = await inspectMse("C:/project", { tasks: ["StartUp"] });
+const resolvedProject = await resolveMse("C:/project", {
+  tasks: ["StartUp"],
+  controller: "Adb",
+  resource: "Official",
+  includeReferencers: false,
+});
+const combined = await inspect("C:/materials");
+const repositoryDocs = await inspectRepositoryDocs("C:/issue-checkout");
+const text = view(combined, { format: "text" });
+const matches = searchEvidence(combined, {
+  kinds: ["mla.recognition_detail"],
+  nodes: ["DailyProtocolMissionsPick"],
+  text: ["一键领取"],
+  limit: 20,
+});
+const selectedEvidence = evidenceById(combined.evidence, "evidence-abc123");
+const window = await queryEvidenceWindow(runtime, {
+  evidenceId: runtime.evidence[0]?.id,
+});
+const answers = await queryEvidenceBatch(runtime, [
+  { id: "tasks", operation: "search", query: { kinds: ["mla.task"] } },
+  { id: "fact", operation: "view", evidenceId: "evidence-abc123" },
+  { id: "context", operation: "window", query: { evidenceId: "evidence-abc123" } },
+]);
+```
+
+## 后续追问建议
+
+后续追问建议先从 JSON 结果中选择并引用 evidence ID,再使用 CLI 的
+`view --evidence-id` 查看该条事实的完整 `data`,使用 `window --evidence-id` 查看其来源日志上下文。
+`view --evidence-id` 支持 JSON 和 text;`window` 默认保持 JSON,也支持 `--format text`。
+未知 evidence ID 会明确报错,不会静默返回空结果。
+
+## 选项语义
+
+- `inspectMla`:`timeRange`(`from` / `to`)用于按时间缩小证据范围,行为与 CLI
+  `mla inspect --from/--to` 一致,限制见 [CLI 参考](cli.md)。
+- `inspectMse` / `resolveMse`:`tasks`、`controller`、`resource`、`includeReferencers`。
+  `includeReferencers: false` 对应 CLI `--no-referencers`,用于公共节点只取定义及前向路径时
+  关闭反向引用展开;展开深度由 `depth` 控制(默认两层)。
+  `inspectMse` 还接受 `gitRef`:按该 git ref 的提交内容检查,内容物化到临时目录而不触碰工作树,
+  解析出的 commit 在 `details.gitSource`。`resolveMse` 目前不支持该选项。
+- `inspect`(组合检查):未传非空 `mse.tasks` 时,自动用最多 128 个运行时节点名填充 MSE 任务列表,
+  并以 `depth: 0` / `includeReferencers: false` 展开;`tasks` 非空时保留该名单并使用 MSE 普通默认。
+  无论是否传入 `tasks`,combined.* 关联仍最多考虑 128 个运行时节点。
+  `InspectOptions.mse.depth` / `includeReferencers` 可覆盖上述默认;CLI 需要展开反向引用时使用
+  `inspect --referencers --depth N`。
+- `inspectRepositoryDocs`:显式清点 checkout 中受界的 `AGENTS.md` 文本和三个已知 Skill 根目录
+  下的 `SKILL.md` 路径结构。它不解析或执行 Skill,也不会由组合 `inspect` 自动调用。
+- `searchEvidence` / `queryEvidenceBatch` / `queryEvidenceWindow`:与 CLI `search` / `batch` /
+  `window` 命令同语义,包括精确/模糊匹配规则、结果上限与批量严格校验,见 [CLI 参考](cli.md)。
+  `queryEvidenceBatch` 的 `view` 请求除 `evidenceId` 外也接受与 `search` 相同的 `query`
+  (两者不能同时使用),按 `query` 解析时结果带 `matchCount`,查询无匹配会让整批失败。
+- MLA 信号穷举:设置 `includeAllSignals: true`(对应 CLI `--all-signals`),见
+  [输出模型](evidence-model.md)。
+- `selectFields` / `parseFields`:与 CLI `--fields` 相同的点分路径投影。`selectFields(value, paths)`
+  返回保持嵌套形状的新值(路径穿过数组时逐元素投影),路径不存在时抛出 `UsageError` 并列出该层
+  可用 key;两条路径在同一数组上选中不同数量的元素时同样抛出 `UsageError`(元素缺失时被省略,
+  按下标合并会把值贴到别的元素上),调用方需要分开投影;`parseFields` 负责把重复、逗号分隔的 `--fields` 取值解析成去重后的路径列表。harness
+  用它替代"整份文档丢给 `JSON.parse` 再手写取字段"的写法,也不会把拼错字段静默变成 `undefined`。
+
+## 输出模型
+
+SDK 返回与 CLI 输出相同的 `maa-evidence/v1` 结构;各 evidence 种类、统计字段和截断语义见
+[`docs/evidence-model.md`](evidence-model.md)。
+
+SDK 根入口同时导出可命名的公开类型:`MlaAnomalyCode` 与 `MlaTaskAnomaly` 对应
+`mla.task_anomaly` 的稳定异常代码及其记录结构,`MlaRuntimeInspectionResult` 对应译码后的运行时
+结果。使用者可以直接引用这些类型名,而不必自行重抄字面量。

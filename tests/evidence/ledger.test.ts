@@ -1,0 +1,200 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, test } from "vitest";
+
+import {
+  EVIDENCE_SCHEMA_VERSION,
+  EvidenceLedger,
+  artifactId,
+  findByteIdenticalArtifacts,
+  findCrossArtifactDuplicateObservations,
+  queryEvidenceWindow,
+  type InspectionResult,
+} from "../../src/index.js";
+
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("evidence ledger", () => {
+  test("generates stable IDs and deduplicates identical evidence", () => {
+    const first = new EvidenceLedger();
+    const second = new EvidenceLedger();
+    const source = { artifactId: "artifact-a", path: "maafw.log", line: 2 };
+    const left = first.add("mla.session", "session", source, { version: "v5.12.2" });
+    const duplicate = first.add("mla.session", "changed display text", source, { version: "v5.12.2" });
+    const right = second.add("mla.session", "session", source, { version: "v5.12.2" });
+
+    expect(duplicate.id).toBe(left.id);
+    expect(right.id).toBe(left.id);
+    expect(first.values()).toHaveLength(1);
+    expect(artifactId("debug\\maafw.log")).toBe(artifactId("debug/maafw.log"));
+    expect(artifactId("logs/MAA.log")).not.toBe(artifactId("logs/maa.log"));
+  });
+
+  test("reports identical observations repeated across mirrored artifacts", () => {
+    const observation = (id: string, artifact: string, summary: string) => ({
+      id,
+      kind: "mla.action_detail",
+      summary,
+      source: { artifactId: artifact, path: "maafw.log", line: 1, node: "EatCandyStart" },
+      data: {},
+    });
+    const duplicates = findCrossArtifactDuplicateObservations([
+      observation("evidence-a", "artifact-launcher", "Action EatCandyStart succeeded (Click) x2."),
+      observation("evidence-b", "artifact-agent", "Action EatCandyStart succeeded (Click) x2."),
+      observation("evidence-c", "artifact-launcher", "Action EatCandyStart succeeded (Click) x1."),
+    ]);
+
+    expect(duplicates.observationGroups).toBe(1);
+    expect(duplicates.duplicateRecords).toBe(2);
+    expect(duplicates.artifactIds).toEqual(["artifact-agent", "artifact-launcher"]);
+
+    const single = findCrossArtifactDuplicateObservations([
+      observation("evidence-a", "artifact-launcher", "Action EatCandyStart succeeded (Click) x2."),
+      observation("evidence-c", "artifact-launcher", "Action EatCandyStart succeeded (Click) x1."),
+    ]);
+    expect(single.observationGroups).toBe(0);
+    expect(single.artifactIds).toEqual([]);
+  });
+
+  test("names each mirrored group and the artifact to count from", () => {
+    const observation = (id: string, artifact: string, summary: string) => ({
+      id,
+      kind: "mla.action_detail",
+      summary,
+      source: { artifactId: artifact, path: "maafw.log", line: 1, node: "EatCandyStart" },
+      data: {},
+    });
+    const records = [
+      observation("evidence-a", "artifact-launcher", "Action EatCandyStart succeeded (Click) x2."),
+      observation("evidence-b", "artifact-agent", "Action EatCandyStart succeeded (Click) x2."),
+      observation("evidence-c", "artifact-launcher", "Action EatCandyStart succeeded (Click) x1."),
+      observation("evidence-d", "artifact-agent", "Action EatCandyStart succeeded (Click) x1."),
+      observation("evidence-e", "artifact-launcher", "Only one artifact saw this."),
+    ];
+
+    const duplicates = findCrossArtifactDuplicateObservations(records, [
+      "artifact-agent",
+      "artifact-launcher",
+    ]);
+
+    expect(duplicates.observationGroups).toBe(2);
+    expect(duplicates.duplicateRecords).toBe(4);
+    expect(duplicates.groups).toHaveLength(2);
+    for (const group of duplicates.groups) {
+      expect(group.artifactIds).toEqual(["artifact-agent", "artifact-launcher"]);
+      // Discovery order decides the preferred copy; both groups list the agent copy first here.
+      expect(group.preferredArtifactId).toBe("artifact-agent");
+      expect(group.recordCount).toBe(2);
+      expect(group.recordIds).toHaveLength(2);
+    }
+    expect(duplicates.groups.map((group) => group.recordIds).flat().sort()).toEqual([
+      "evidence-a",
+      "evidence-b",
+      "evidence-c",
+      "evidence-d",
+    ]);
+    // Without an order the tie-break is the artifact ID, so the result stays deterministic.
+    expect(
+      findCrossArtifactDuplicateObservations(records).groups[0]?.preferredArtifactId,
+    ).toBe("artifact-agent");
+  });
+
+  test("groups artifacts whose bytes are identical and excludes undigested records", () => {
+    const artifact = (
+      id: string,
+      relativePath: string,
+      contentDigest?: string,
+    ) => ({
+      id,
+      path: `/root/${relativePath}`,
+      relativePath,
+      kind: "image" as const,
+      status: "selected" as const,
+      ...(contentDigest === undefined ? {} : { contentDigest }),
+    });
+
+    const identical = findByteIdenticalArtifacts([
+      artifact("artifact-a", "on_error/first.png", "sha256:aa"),
+      artifact("artifact-b", "on_error/second.png", "sha256:aa"),
+      artifact("artifact-c", "on_error/third.png", "sha256:bb"),
+      // No digest: never read, so it is not assumed to be distinct or identical.
+      artifact("artifact-d", "on_error/unread.png"),
+    ]);
+
+    expect(identical.groups).toEqual([{
+      contentDigest: "sha256:aa",
+      artifactIds: ["artifact-a", "artifact-b"],
+      relativePaths: ["on_error/first.png", "on_error/second.png"],
+    }]);
+    expect(identical.artifactRecords).toBe(2);
+    expect(identical.deduplicatedRecords).toBe(1);
+
+    const distinct = findByteIdenticalArtifacts([
+      artifact("artifact-a", "on_error/first.png", "sha256:aa"),
+      artifact("artifact-c", "on_error/third.png", "sha256:bb"),
+      artifact("artifact-d", "on_error/unread.png"),
+    ]);
+    expect(distinct.groups).toEqual([]);
+    expect(distinct.artifactRecords).toBe(0);
+    expect(distinct.deduplicatedRecords).toBe(0);
+  });
+
+  test("reads a bounded source window only from an inventoried artifact", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mek-window-"));
+    temporaryRoots.push(root);
+    await mkdir(root, { recursive: true });
+    const file = path.join(root, "maafw.log");
+    await writeFile(file, ["one", "two", "three", "four", "five"].join("\n"), "utf8");
+    const artifact = {
+      id: artifactId("maafw.log"),
+      path: file,
+      relativePath: "maafw.log",
+      kind: "maa_log" as const,
+      status: "selected" as const,
+    };
+    const result: InspectionResult = {
+      schemaVersion: EVIDENCE_SCHEMA_VERSION,
+      kind: "mla",
+      generatedAt: new Date(0).toISOString(),
+      input: { path: root },
+      artifacts: [artifact],
+      evidence: [{
+        id: "evidence-line-three",
+        kind: "test",
+        summary: "line three",
+        source: { artifactId: artifact.id, path: artifact.relativePath, line: 3 },
+        data: {},
+      }],
+      missingEvidence: [],
+      warnings: [],
+      statistics: {},
+      details: {},
+    };
+
+    const window = await queryEvidenceWindow(result, {
+      evidenceId: "evidence-line-three",
+      before: 1,
+      after: 1,
+    });
+
+    expect(window.startLine).toBe(2);
+    expect(window.endLine).toBe(4);
+    expect(window.text).toBe("2: two\n3: three\n4: four");
+    await expect(queryEvidenceWindow(result, { artifactId: "unknown" })).rejects.toThrow(
+      "Unknown artifact ID",
+    );
+    const skipped: InspectionResult = {
+      ...result,
+      artifacts: [{ ...artifact, status: "skipped", reason: "not_authorized" }],
+    };
+    await expect(queryEvidenceWindow(skipped, { artifactId: artifact.id })).rejects.toThrow(
+      "authorized readable artifact",
+    );
+  });
+});

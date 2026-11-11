@@ -1,0 +1,76 @@
+{
+  "name": "maa-evidence-kit",
+  "version": "0.10.0",
+  "description": "Deterministic evidence extraction and diagnostic toolkit for MaaFramework",
+  "license": "MIT",
+  "author": "Windsland52",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Windsland52/MaaEvidenceKit.git"
+  },
+  "keywords": [
+    "maa-framework",
+    "diagnostics",
+    "logs",
+    "evidence"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "maa-evidence": "./dist/cli/main.js",
+    "maa-evidence-probe": "./dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "skills",
+    "CHANGELOG.md",
+    "LICENSE",
+    "PRIVACY.md",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "pnpm clean && tsc -p tsconfig.build.json",
+    "package:smoke": "node scripts/package-smoke.mjs",
+    "release:check": "pnpm check && pnpm package:smoke",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint src tests scripts",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "prepack": "pnpm build",
+    "prepublishOnly": "pnpm release:check",
+    "build:portable": "pnpm clean && npx --yes -p typescript@5.9.3 tsc -p tsconfig.build.json"
+  },
+  "engines": {
+    "node": ">=22.17.0"
+  },
+  "packageManager": "pnpm@11.5.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@nekosu/maa-pipeline-manager": "1.1.0",
+    "@nekosu/maa-tasker": "1.0.0",
+    "@sentry/node": "11.6.0",
+    "@windsland52/maa-log-tools": "2.1.2",
+    "cross-spawn": "7.0.6",
+    "semver": "7.8.5"
+  },
+  "devDependencies": {
+    "@maaxyz/maa-node": "5.14.3",
+    "@types/cross-spawn": "6.0.6",
+    "@types/node": "22.20.5",
+    "@types/semver": "7.8.0",
+    "oxlint": "1.87.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

@@ -1,0 +1,188 @@
+import { expect, test } from "vitest";
+
+import {
+  EVIDENCE_SCHEMA_VERSION,
+  searchEvidence,
+  type Evidence,
+  type InspectionResult,
+} from "../../src/index.js";
+
+function inspection(evidence: Evidence[]): InspectionResult {
+  return {
+    schemaVersion: EVIDENCE_SCHEMA_VERSION,
+    kind: "mla",
+    generatedAt: "2026-08-06T00:00:00.000Z",
+    input: { path: "C:/logs" },
+    artifacts: [],
+    evidence,
+    missingEvidence: [],
+    warnings: [],
+    statistics: {},
+    details: {},
+  };
+}
+
+test("searches deterministic evidence fields and returns a bounded index", () => {
+  const result = inspection([
+    {
+      id: "evidence-1",
+      kind: "mla.recognition_detail",
+      summary: "OCR observation",
+      source: {
+        artifactId: "artifact-1",
+        path: "maafw.log",
+        line: 10,
+        timestamp: "2026-08-06T12:37:40.000Z",
+        task: "DailyRewardStart",
+        node: "DailyProtocolSwitchWeeklyMission",
+      },
+      data: { best: { text: "NEW", score: 0.91 } },
+    },
+    {
+      id: "evidence-2",
+      kind: "mla.recognition_detail",
+      summary: "Other observation",
+      source: {
+        artifactId: "artifact-1",
+        path: "maafw.log",
+        line: 20,
+        timestamp: "2026-08-06T12:40:00.000Z",
+        task: "OtherTask",
+        node: "OtherNode",
+      },
+      data: { best: { text: "claim" } },
+    },
+  ]);
+
+  const search = searchEvidence(result, {
+    kinds: ["mla.recognition_detail"],
+    nodes: ["DailyProtocolSwitchWeeklyMission"],
+    tasks: ["DailyRewardStart"],
+    text: ["new", "0.91"],
+    timeRange: {
+      from: "2026-08-06T12:37:00.000Z",
+      to: "2026-08-06T12:38:00.000Z",
+    },
+    limit: 1,
+  });
+
+  expect(search.totalMatches).toBe(1);
+  expect(search.returned).toBe(1);
+  expect(search.truncated).toBe(false);
+  expect(search.evidence).toEqual([{
+    id: "evidence-1",
+    kind: "mla.recognition_detail",
+    summary: "OCR observation",
+    source: result.evidence[0]?.source,
+    nodeMatches: [{ node: "DailyProtocolSwitchWeeklyMission", relation: "source" }],
+  }]);
+  expect(search.evidence[0]).not.toHaveProperty("data");
+});
+
+test("matches retained child and descendant recognition nodes exactly", () => {
+  const result = inspection([{
+    id: "evidence-nested",
+    kind: "mla.recognition_detail",
+    summary: "Nested And observation",
+    source: {
+      artifactId: "artifact-1",
+      path: "maafw.log",
+      node: "Parent",
+    },
+    data: {
+      childRecognition: [{ name: "DirectChild" }],
+      descendantRecognition: [
+        { name: "DirectChild", path: ["DirectChild"] },
+        { name: "NestedLeaf", path: ["NestedAnd", "NestedLeaf"] },
+      ],
+      descendantRecognitionTruncated: false,
+    },
+  }]);
+
+  const child = searchEvidence(result, { nodes: ["DirectChild"] });
+  expect(child.evidence[0]?.nodeMatches).toEqual([{
+    node: "DirectChild",
+    relation: "recognition_child",
+    path: ["DirectChild"],
+  }]);
+
+  const descendant = searchEvidence(result, { nodes: ["NestedLeaf"] });
+  expect(descendant.evidence[0]?.nodeMatches).toEqual([{
+    node: "NestedLeaf",
+    relation: "recognition_descendant",
+    path: ["NestedAnd", "NestedLeaf"],
+  }]);
+});
+
+test("matches the nodes a runtime pipeline override targets", () => {
+  const result = inspection([{
+    id: "evidence-override",
+    kind: "mla.pipeline_override",
+    summary: "Observed task submission pipeline override for 2 nodes.",
+    source: { artifactId: "artifact-1", path: "maafw.log", line: 42, task: "CombatActivity" },
+    data: {
+      nodeNames: ["EatCandyStart", "EatMiniCandy"],
+      patchPaths: ["EatCandyStart.attach.fast", "EatCandyStart.max_hit", "EatMiniCandy.enabled"],
+      patchPathsTruncated: false,
+      patches: [{ EatCandyStart: { attach: { fast: 1 } } }],
+    },
+  }]);
+
+  const byNode = searchEvidence(result, { nodes: ["EatCandyStart"] });
+  expect(byNode.evidence[0]?.nodeMatches).toEqual([{
+    node: "EatCandyStart",
+    relation: "pipeline_override",
+  }]);
+  expect(searchEvidence(result, { nodes: ["Unrelated"] }).totalMatches).toBe(0);
+
+  // The overridden field name only exists as an object key inside `patches`, which text search
+  // deliberately ignores; the flattened patch paths keep it findable as an ordinary value.
+  expect(searchEvidence(result, { text: ["fast"] }).totalMatches).toBe(1);
+  expect(searchEvidence(result, { text: ["attach.fast"] }).totalMatches).toBe(1);
+});
+
+test("reports truncation and rejects invalid search bounds", () => {
+  const result = inspection(Array.from({ length: 3 }, (_, index) => ({
+    id: `evidence-${index}`,
+    kind: "test",
+    summary: `Evidence ${index}`,
+    source: { artifactId: "artifact-1", path: "maafw.log", line: index + 1 },
+    data: {},
+  })));
+
+  const search = searchEvidence(result, { limit: 2 });
+  expect(search.totalMatches).toBe(3);
+  expect(search.returned).toBe(2);
+  expect(search.truncated).toBe(true);
+  expect(() => searchEvidence(result, { limit: 501 })).toThrow("limit");
+  expect(() => searchEvidence(result, { text: ["  "] })).toThrow("must not be empty");
+});
+
+test("searches primitive values without matching object keys and can select an artifact", () => {
+  const result = inspection([
+    {
+      id: "evidence-success",
+      kind: "mla.task",
+      summary: "Task succeeded",
+      source: { artifactId: "artifact-main", path: "maafw.log" },
+      data: { status: "succeeded", failed_nodes: 0 },
+    },
+    {
+      id: "evidence-failed-main",
+      kind: "mla.task",
+      summary: "Task failed",
+      source: { artifactId: "artifact-main", path: "maafw.log" },
+      data: { status: "failed" },
+    },
+    {
+      id: "evidence-failed-mirror",
+      kind: "mla.task",
+      summary: "Task failed",
+      source: { artifactId: "artifact-mirror", path: "debug/maafw.log" },
+      data: { status: "failed" },
+    },
+  ]);
+
+  const search = searchEvidence(result, { artifactIds: ["artifact-main"], text: ["failed"] });
+  expect(search.evidence.map((item) => item.id)).toEqual(["evidence-failed-main"]);
+});
